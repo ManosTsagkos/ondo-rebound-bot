@@ -5,11 +5,12 @@ from datetime import datetime, timedelta
 
 # ========== ΣΤΡΑΤΗΓΙΚΗ ==========
 REBOUND_PCT = 7.0                     # % ανάκαμψης για αγορά
+ATR_MULTIPLIER = 2.0                  # Πόσες φορές το ATR θα είναι το trailing distance
 MIN_SWING_DISTANCE_PCT = 20           # ελάχιστη διαφορά μεταξύ swing points
 
 # ========== SECRETS ==========
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
-ENTER_LONG_MESSAGE = os.environ.get("ENTER_LONG_MESSAGE")
+# Δεν χρειαζόμαστε πλέον το ENTER_LONG_MESSAGE, γιατί στέλνουμε JSON
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
@@ -29,7 +30,8 @@ def load_state():
             "supports": [],
             "resistances": [],
             "last_update": None,
-            "asset_age_days": None
+            "asset_age_days": None,
+            "atr_value": None
         }
 
 def save_state(state):
@@ -53,17 +55,37 @@ def send_telegram(message):
     except Exception as e:
         print(f"Telegram error: {e}")
 
-def send_buy_signal():
-    if not WEBHOOK_URL or not ENTER_LONG_MESSAGE:
-        print("Webhook/Message missing")
+def send_buy_signal(trailing_distance_pct):
+    """Στέλνει σήμα αγοράς με δυναμικό trailing distance."""
+    if not WEBHOOK_URL:
+        print("Webhook missing")
         return
+    # Δημιουργούμε JSON payload που θα διαβάσει το WunderTrading
+    payload = {
+        "code": "ENTER-LONG_KuCoin_ONDO-USDT_BDSATH ONDO_5M_9f474ad57d91e7d0db7b836d",  # Βάλε το δικό σου Enter‑Long σχόλιο
+        "orderType": "market",
+        "amountPerTradeType": "quote",
+        "amountPerTrade": 50,          # ή όσο έχεις ορίσει
+        "leverage": 1,
+        "takeProfits": [
+            {
+                "price": 0,            # αφήνουμε το Trailing Stop να το καθορίσει
+                "portfolio": 100       # 100% της θέσης
+            }
+        ],
+        "trailingStop": {
+            "activation": 2.0,         # ενεργοποίηση στο +2% κέρδος
+            "execute": trailing_distance_pct   # δυναμική απόσταση από το ATR
+        }
+    }
     try:
-        resp = requests.post(WEBHOOK_URL, data=ENTER_LONG_MESSAGE.encode("utf-8"), timeout=10)
+        resp = requests.post(WEBHOOK_URL, json=payload, timeout=10)
         print(f"Webhook response: {resp.status_code}")
         send_telegram(
-            f"✅ *Σήμα ΑΓΟΡΑΣ ONDO (Dynamic Hybrid)*\n"
+            f"✅ *Σήμα ΑΓΟΡΑΣ ONDO (Dynamic ATR)*\n"
             f"Τιμή τώρα: {get_price()}\n"
             f"Rebound: {REBOUND_PCT}%\n"
+            f"Trailing Distance (ATR×{ATR_MULTIPLIER}): {trailing_distance_pct:.1f}%\n"
             f"Ώρα: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
         )
     except Exception as e:
@@ -101,8 +123,8 @@ def determine_lookbacks(state):
     else:
         return 730, 1460     # 2Y, 4Y
 
-def get_swings(symbol, lookback_days):
-    """Παίρνει εβδομαδιαία κεριά και βρίσκει 3 swing lows & 3 swing highs."""
+def get_weekly_data(symbol, lookback_days):
+    """Παίρνει εβδομαδιαία κεριά και επιστρέφει highs, lows, closes."""
     end = int(datetime.now().timestamp())
     start = int((datetime.now() - timedelta(days=lookback_days)).timestamp())
     params = {"type": "1week", "symbol": symbol, "startAt": start, "endAt": end}
@@ -110,35 +132,53 @@ def get_swings(symbol, lookback_days):
         resp = requests.get(KUCOIN_API_KLINES, params=params, timeout=15)
         data = resp.json()['data']
         if not data:
-            return [], []
+            return [], [], []
         data.sort(key=lambda x: int(x[0]))
         highs = [float(c[3]) for c in data]
         lows = [float(c[4]) for c in data]
-
-        swing_lows, swing_highs = [], []
-        for i in range(1, len(highs)-1):
-            if highs[i] > highs[i-1] and highs[i] > highs[i+1]:
-                swing_highs.append(highs[i])
-            if lows[i] < lows[i-1] and lows[i] < lows[i+1]:
-                swing_lows.append(lows[i])
-
-        def filter_swings(points, keep_high=True):
-            if not points:
-                return []
-            points.sort(reverse=keep_high)
-            filtered = [points[0]]
-            for p in points[1:]:
-                if abs(p - filtered[-1]) / filtered[-1] >= MIN_SWING_DISTANCE_PCT / 100:
-                    filtered.append(p)
-            return filtered
-
-        return filter_swings(swing_lows, keep_high=False)[:3], filter_swings(swing_highs, keep_high=True)[:3]
+        closes = [float(c[2]) for c in data]
+        return highs, lows, closes
     except Exception as e:
         print(f"Error fetching klines: {e}")
-        return [], []
+        return [], [], []
+
+def find_swings(highs, lows):
+    """Βρίσκει 3 swing lows & 3 swing highs."""
+    swing_lows, swing_highs = [], []
+    for i in range(1, len(highs)-1):
+        if highs[i] > highs[i-1] and highs[i] > highs[i+1]:
+            swing_highs.append(highs[i])
+        if lows[i] < lows[i-1] and lows[i] < lows[i+1]:
+            swing_lows.append(lows[i])
+
+    def filter_swings(points, keep_high=True):
+        if not points:
+            return []
+        points.sort(reverse=keep_high)
+        filtered = [points[0]]
+        for p in points[1:]:
+            if abs(p - filtered[-1]) / filtered[-1] >= MIN_SWING_DISTANCE_PCT / 100:
+                filtered.append(p)
+        return filtered
+
+    return filter_swings(swing_lows, keep_high=False)[:3], filter_swings(swing_highs, keep_high=True)[:3]
+
+def calculate_atr(highs, lows, closes, period=14):
+    """Υπολογίζει το Average True Range (ATR)."""
+    if len(highs) < period:
+        return None
+    tr = []
+    for i in range(1, len(highs)):
+        h_l = highs[i] - lows[i]
+        h_cp = abs(highs[i] - closes[i-1])
+        l_cp = abs(lows[i] - closes[i-1])
+        tr.append(max(h_l, h_cp, l_cp))
+    if len(tr) < period:
+        return None
+    return sum(tr[-period:]) / period
 
 def update_levels(state):
-    """Ανανεώνει supports & resistances μία φορά την εβδομάδα."""
+    """Ανανεώνει supports, resistances και ATR μία φορά την εβδομάδα."""
     today = datetime.now().strftime("%Y-%U")
     if state.get("last_update") == today:
         return state
@@ -146,14 +186,26 @@ def update_levels(state):
     supp_lb, res_lb = determine_lookbacks(state)
     print(f"Asset age: {state.get('asset_age_days', '?')}d → Supports: {supp_lb}d, Resistances: {res_lb}d")
 
-    supports, _ = get_swings("ONDO-USDT", supp_lb)
-    _, resistances = get_swings("ONDO-USDT", res_lb)
-
-    if supports and resistances:
+    # Για supports: 1 έτος
+    s_highs, s_lows, s_closes = get_weekly_data("ONDO-USDT", supp_lb)
+    if s_highs:
+        supports, _ = find_swings(s_highs, s_lows)
         state["supports"] = supports
+        # Υπολογισμός ATR
+        atr = calculate_atr(s_highs, s_lows, s_closes, 14)
+        if atr:
+            state["atr_value"] = atr
+            print(f"ATR: {atr}")
+
+    # Για resistances: 2 έτη
+    r_highs, r_lows, _ = get_weekly_data("ONDO-USDT", res_lb)
+    if r_highs:
+        _, resistances = find_swings(r_highs, r_lows)
         state["resistances"] = resistances
+
+    if state.get("supports") and state.get("resistances"):
         state["last_update"] = today
-        print(f"Supports: {supports}, Resistances: {resistances}")
+        print(f"Supports: {state['supports']}, Resistances: {state['resistances']}")
     return state
 
 # ========== ΚΥΡΙΩΣ ΡΟΗ ==========
@@ -170,10 +222,17 @@ if not supports or not resistances:
     print("Αναμονή για swing points.")
     exit()
 
-activation_support = max(supports)        # υψηλότερο support
-exit_resistance = min(resistances)        # χαμηλότερο resistance
+activation_support = max(supports)
+exit_resistance = min(resistances)
 
-print(f"Τιμή: {price}, Activation: {activation_support}, Exit zone: {exit_resistance}")
+# Υπολογισμός trailing distance (%)
+atr = state.get("atr_value")
+if atr and price > 0:
+    trailing_distance_pct = (atr * ATR_MULTIPLIER) / price * 100
+else:
+    trailing_distance_pct = 5.0  # fallback
+
+print(f"Τιμή: {price}, Activation: {activation_support}, Exit zone: {exit_resistance}, Trailing distance: {trailing_distance_pct:.1f}%")
 
 # --- ΕΙΔΟΠΟΙΗΣΗ ΖΩΝΗΣ ΠΩΛΗΣΗΣ ---
 if price >= exit_resistance:
@@ -181,7 +240,7 @@ if price >= exit_resistance:
         f"🔔 *Ζώνη πώλησης ONDO*\n"
         f"Τιμή: {price}\n"
         f"Αντίσταση ενεργοποίησης: {exit_resistance}\n"
-        f"Το Trailing Stop του WunderTrading αναλαμβάνει."
+        f"Το Trailing Stop (ATR×{ATR_MULTIPLIER}) αναλαμβάνει."
     )
 
 # --- ΕΙΣΟΔΟΣ (TRAILING BUY) ---
@@ -202,7 +261,7 @@ if activated:
     print(f"Rebound level: {rebound_level:.4f}")
     if price > rebound_level:
         print("✅ Rebound! Αποστολή σήματος αγοράς.")
-        send_buy_signal()
+        send_buy_signal(trailing_distance_pct)
         activated = False
         lowest = None
 
