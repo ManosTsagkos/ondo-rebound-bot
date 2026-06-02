@@ -2,15 +2,19 @@ import requests
 import json
 import os
 
+# -------- ΡΥΘΜΙΣΕΙΣ ΣΤΡΑΤΗΓΙΚΗΣ --------
 ACTIVATION_PRICE = 0.24
 REBOUND_PCT = 7.0
 
-# ΒΑΛΕ ΤΟ WEBHOOK URL ΑΠΟ ΤΟ WUNDERTRADING
-WEBHOOK_URL = "https://wtalerts.com/bot/trading_view"
+# -------- WEBHOOK WUNDERTRADING --------
+WEBHOOK_URL = "https://wtalerts.com/bot/trading_view"  # ΒΑΛΕ ΤΟ URL ΣΟΥ
+ENTER_LONG_MESSAGE = "ENTER-LONG_KuCoin_ONDO-USDT_BDSATH ONDO_5M_9f474ad57d91e7d0db7b836d" # ΒΑΛΕ ΤΟ ΜΗΝΥΜΑ
 
-# ΒΑΛΕ ΤΟ ENTER-LONG ΣΧΟΛΙΟ ΑΠΟ ΤΟ BOT ΣΟΥ
-ENTER_LONG_MESSAGE = "ENTER-LONG_KuCoin_ONDO-USDT_BDSATH ONDO_5M_9f474ad57d91e7d0db7b836d"
+# -------- TELEGRAM (από GitHub Secrets) --------
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
+# -------- API Kucoin --------
 KUCOIN_API = "https://api.kucoin.com/api/v1/market/orderbook/level1?symbol=ONDO-USDT"
 STATE_FILE = "state.json"
 
@@ -34,14 +38,44 @@ def get_price():
         print(f"Error getting price: {e}")
         return None
 
+def send_telegram(message):
+    """Στέλνει μήνυμα στο Telegram (αν έχουν οριστεί τα secrets)."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram not configured – skipping notification.")
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        if resp.status_code == 200:
+            print("Telegram notification sent.")
+        else:
+            print(f"Telegram error: {resp.text}")
+    except Exception as e:
+        print(f"Failed to send Telegram: {e}")
+
 def send_webhook():
     print("Sending buy signal...")
     try:
         resp = requests.post(WEBHOOK_URL, data=ENTER_LONG_MESSAGE.encode("utf-8"), timeout=10)
         print(f"Webhook response: {resp.status_code}")
+        # Ειδοποίηση επιτυχίας
+        send_telegram(
+            f"✅ *Σήμα αγοράς ONDO!*\n"
+            f"Το bot έστειλε εντολή αγοράς μέσω WunderTrading.\n"
+            f"Τιμή ενεργοποίησης: {ACTIVATION_PRICE} USD\n"
+            f"Rebound: {REBOUND_PCT}%\n"
+            f"Ώρα: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
     except Exception as e:
         print(f"Error sending webhook: {e}")
+        send_telegram(f"❌ *Σφάλμα αποστολής σήματος:* {e}")
 
+# -------- ΚΥΡΙΑ ΛΟΓΙΚΗ --------
 state = load_state()
 activated = state["activated"]
 lowest_since_activation = state["lowest_since_activation"]
