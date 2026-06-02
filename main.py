@@ -3,28 +3,21 @@ import json
 import os
 from datetime import datetime, timedelta
 
-# ========== ΡΥΘΜΙΣΕΙΣ ΣΤΡΑΤΗΓΙΚΗΣ ==========
-REBOUND_PCT = 7.0                     # % ανάκαμψης από το χαμηλό για αγορά
-TRAILING_SELL_DISTANCE = 5.0          # % πτώσης από κορυφή για έξοδο (στο WunderTrading)
-MIN_DROP_FROM_ACTIVATION = 20.0       # ελάχιστη πτώση από το activation για να ανοίξει θέση (%)
+# ========== ΣΤΡΑΤΗΓΙΚΗ ==========
+REBOUND_PCT = 7.0                     # % ανάκαμψης για αγορά
+MIN_SWING_DISTANCE_PCT = 20           # ελάχιστη διαφορά μεταξύ swing points
 
-# Secrets (GitHub Actions)
+# ========== SECRETS ==========
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 ENTER_LONG_MESSAGE = os.environ.get("ENTER_LONG_MESSAGE")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# ========== ΠΑΡΑΜΕΤΡΟΙ ΑΝΑΛΥΣΗΣ ==========
-LOOKBACK_1Y = 365                     # 1 έτος για supports
-LOOKBACK_2Y = 730                     # 2 έτη για resistances
-LOOKBACK_4Y = 1460                    # 4 έτη για πολύ παλιά crypto
-MIN_SWING_DISTANCE_PCT = 20           # ελάχιστη διαφορά μεταξύ swing points (20%)
-
+# ========== ΡΥΘΜΙΣΕΙΣ ==========
 KUCOIN_API_PRICE = "https://api.kucoin.com/api/v1/market/orderbook/level1?symbol=ONDO-USDT"
 KUCOIN_API_KLINES = "https://api.kucoin.com/api/v1/market/candles"
 STATE_FILE = "state.json"
 
-# ========== ΒΟΗΘΗΤΙΚΕΣ ΣΥΝΑΡΤΗΣΕΙΣ ==========
 def load_state():
     try:
         with open(STATE_FILE, "r") as f:
@@ -68,7 +61,7 @@ def send_buy_signal():
         resp = requests.post(WEBHOOK_URL, data=ENTER_LONG_MESSAGE.encode("utf-8"), timeout=10)
         print(f"Webhook response: {resp.status_code}")
         send_telegram(
-            f"✅ *Σήμα ΑΓΟΡΑΣ ONDO (Hybrid Macro)*\n"
+            f"✅ *Σήμα ΑΓΟΡΑΣ ONDO (Dynamic Hybrid)*\n"
             f"Τιμή τώρα: {get_price()}\n"
             f"Rebound: {REBOUND_PCT}%\n"
             f"Ώρα: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
@@ -77,58 +70,42 @@ def send_buy_signal():
         print(f"Webhook error: {e}")
 
 def get_available_history():
-    """Ελέγχει πόσες ημέρες ιστορικών δεδομένων υπάρχουν για το ONDO."""
-    # Δοκιμάζουμε να πάρουμε δεδομένα από την αρχή του 2024
+    """Ελέγχει πόσες ημέρες ιστορικών δεδομένων υπάρχουν."""
     test_start = int(datetime(2024, 1, 1).timestamp())
     now = int(datetime.now().timestamp())
-    params = {
-        "type": "1day",
-        "symbol": "ONDO-USDT",
-        "startAt": test_start,
-        "endAt": now
-    }
+    params = {"type": "1day", "symbol": "ONDO-USDT", "startAt": test_start, "endAt": now}
     try:
         resp = requests.get(KUCOIN_API_KLINES, params=params, timeout=10)
         data = resp.json().get('data', [])
         if not data:
             return None
         data.sort(key=lambda x: int(x[0]))
-        first_timestamp = int(data[0][0])
-        days_available = (now - first_timestamp) // 86400
-        return days_available
+        return (now - int(data[0][0])) // 86400
     except Exception as e:
         print(f"Error getting history length: {e}")
         return None
 
-def determine_lookback(state):
-    """Καθορίζει το lookback για supports και resistances με βάση την ηλικία του asset."""
+def determine_lookbacks(state):
+    """Καθορίζει lookback για supports & resistances με βάση την ηλικία."""
     days = state.get("asset_age_days")
     if days is None:
         days = get_available_history()
         if days is None:
-            days = 365  # default 1 έτος
+            days = 365
         state["asset_age_days"] = days
 
     if days < 365:
-        # Νεοσύστατα (<1 έτους)
-        return 180, 365  # 6 μήνες για supports, 1 έτος για resistances
+        return 180, 365      # 6M, 1Y
     elif days < 1095:
-        # Μεσαία (1-3 έτη, π.χ. ONDO)
-        return LOOKBACK_1Y, LOOKBACK_2Y  # 1 έτος supports, 2 έτη resistances
+        return 365, 730      # 1Y, 2Y (ONDO)
     else:
-        # Ώριμα (>3 έτη)
-        return LOOKBACK_2Y, LOOKBACK_4Y  # 2 έτη supports, 4 έτη resistances
+        return 730, 1460     # 2Y, 4Y
 
 def get_swings(symbol, lookback_days):
-    """Κατεβάζει εβδομαδιαία κεριά και βρίσκει 3 swing lows & 3 swing highs."""
-    end_time = int(datetime.now().timestamp())
-    start_time = int((datetime.now() - timedelta(days=lookback_days)).timestamp())
-    params = {
-        "type": "1week",
-        "symbol": symbol,
-        "startAt": start_time,
-        "endAt": end_time
-    }
+    """Παίρνει εβδομαδιαία κεριά και βρίσκει 3 swing lows & 3 swing highs."""
+    end = int(datetime.now().timestamp())
+    start = int((datetime.now() - timedelta(days=lookback_days)).timestamp())
+    params = {"type": "1week", "symbol": symbol, "startAt": start, "endAt": end}
     try:
         resp = requests.get(KUCOIN_API_KLINES, params=params, timeout=15)
         data = resp.json()['data']
@@ -138,8 +115,7 @@ def get_swings(symbol, lookback_days):
         highs = [float(c[3]) for c in data]
         lows = [float(c[4]) for c in data]
 
-        swing_lows = []
-        swing_highs = []
+        swing_lows, swing_highs = [], []
         for i in range(1, len(highs)-1):
             if highs[i] > highs[i-1] and highs[i] > highs[i+1]:
                 swing_highs.append(highs[i])
@@ -156,26 +132,22 @@ def get_swings(symbol, lookback_days):
                     filtered.append(p)
             return filtered
 
-        swing_highs = filter_swings(swing_highs, keep_high=True)[:3]
-        swing_lows = filter_swings(swing_lows, keep_high=False)[:3]
-        return swing_lows, swing_highs
+        return filter_swings(swing_lows, keep_high=False)[:3], filter_swings(swing_highs, keep_high=True)[:3]
     except Exception as e:
-        print(f"Error fetching klines for {symbol}: {e}")
+        print(f"Error fetching klines: {e}")
         return [], []
 
 def update_levels(state):
-    """Ανανεώνει τα support/resistance μία φορά την εβδομάδα."""
+    """Ανανεώνει supports & resistances μία φορά την εβδομάδα."""
     today = datetime.now().strftime("%Y-%U")
     if state.get("last_update") == today:
         return state
 
-    # Καθορισμός lookback με βάση την ηλικία
-    supp_lookback, res_lookback = determine_lookback(state)
-    print(f"Asset age: {state.get('asset_age_days', '?')} days → Supports: {supp_lookback}d, Resistances: {res_lookback}d")
+    supp_lb, res_lb = determine_lookbacks(state)
+    print(f"Asset age: {state.get('asset_age_days', '?')}d → Supports: {supp_lb}d, Resistances: {res_lb}d")
 
-    # Παίρνουμε ξεχωριστά supports (1 έτος) και resistances (2 έτη)
-    supports, _ = get_swings("ONDO-USDT", supp_lookback)
-    _, resistances = get_swings("ONDO-USDT", res_lookback)
+    supports, _ = get_swings("ONDO-USDT", supp_lb)
+    _, resistances = get_swings("ONDO-USDT", res_lb)
 
     if supports and resistances:
         state["supports"] = supports
@@ -194,57 +166,42 @@ if price is None:
 
 supports = state.get("supports", [])
 resistances = state.get("resistances", [])
-
 if not supports or not resistances:
-    print("Δεν υπάρχουν ακόμα δεδομένα για swing points.")
+    print("Αναμονή για swing points.")
     exit()
 
-# --- ΕΠΙΠΕΔΑ ---
-activation_support = max(supports)       # υψηλότερο support
-exit_resistance = min(resistances)       # χαμηλότερο resistance
+activation_support = max(supports)        # υψηλότερο support
+exit_resistance = min(resistances)        # χαμηλότερο resistance
 
-print(f"Τιμή: {price}, Activation Support: {activation_support}, Exit Resistance: {exit_resistance}")
+print(f"Τιμή: {price}, Activation: {activation_support}, Exit zone: {exit_resistance}")
 
-# --- ΕΙΔΟΠΟΙΗΣΗ ΓΙΑ ΖΩΝΗ ΠΩΛΗΣΗΣ ---
+# --- ΕΙΔΟΠΟΙΗΣΗ ΖΩΝΗΣ ΠΩΛΗΣΗΣ ---
 if price >= exit_resistance:
-    msg = (
-        f"🔔 *ONDO μπήκε στη ζώνη πώλησης!*\n"
+    send_telegram(
+        f"🔔 *Ζώνη πώλησης ONDO*\n"
         f"Τιμή: {price}\n"
-        f"Όριο αντίστασης: {exit_resistance}\n"
-        f"Το Trailing Stop θα ενεργοποιηθεί σύντομα."
+        f"Αντίσταση ενεργοποίησης: {exit_resistance}\n"
+        f"Το Trailing Stop του WunderTrading αναλαμβάνει."
     )
-    send_telegram(msg)
-    print(msg)
 
-# --- ΛΟΓΙΚΗ ΕΙΣΟΔΟΥ (με φίλτρο βάθους 20%) ---
+# --- ΕΙΣΟΔΟΣ (TRAILING BUY) ---
 activated = state.get("activated", False)
 lowest = state.get("lowest_since_activation")
 
 if not activated and price < activation_support:
-    # Έλεγχος ελάχιστης πτώσης 20% από το activation
-    min_price_for_entry = activation_support * (1 - MIN_DROP_FROM_ACTIVATION / 100)
-    if price < min_price_for_entry:
-        activated = True
-        lowest = price
-        print(f"Ενεργοποίηση με βάθος >20%! Αρχικό χαμηλό: {lowest}")
-        send_telegram(
-            f"📉 *Ενεργοποίηση Macro Buy (Hybrid)*\n"
-            f"Τιμή έσπασε το support {activation_support} και έπεσε πάνω από 20%\n"
-            f"Τρέχουσα: {price}"
-        )
-    else:
-        print(f"Η τιμή έσπασε το {activation_support} αλλά δεν έπεσε αρκετά (-20%). Αναμονή.")
+    activated = True
+    lowest = price
+    print(f"Ενεργοποίηση! Τιμή < {activation_support}, αρχικό χαμηλό: {lowest}")
+    send_telegram(f"📉 *Ενεργοποίηση Trailing Buy ONDO*\nΤιμή: {price}")
 
 if activated:
     if lowest is None or price < lowest:
         lowest = price
         print(f"Νέο χαμηλό: {lowest}")
-
     rebound_level = lowest * (1 + REBOUND_PCT / 100)
     print(f"Rebound level: {rebound_level:.4f}")
-
     if price > rebound_level:
-        print("✅ Macro rebound! Αποστολή σήματος αγοράς.")
+        print("✅ Rebound! Αποστολή σήματος αγοράς.")
         send_buy_signal()
         activated = False
         lowest = None
