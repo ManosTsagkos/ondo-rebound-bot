@@ -3,7 +3,6 @@ import json
 import os
 from datetime import datetime, timedelta
 import yfinance as yf
-import pandas as pd
 
 # ========== ΣΤΑΘΕΡΕΣ ΣΤΡΑΤΗΓΙΚΗΣ ==========
 REBOUND_PCT = 7.0
@@ -20,14 +19,18 @@ WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 ENTER_LONG_MESSAGE = os.environ.get("ENTER_LONG_MESSAGE")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+CRYPTOPANIC_API_KEY = os.environ.get("CRYPTOPANIC_API_KEY")  # Προαιρετικό, αλλά προτεινόμενο
 
 # ========== API ENDPOINTS ==========
 KUCOIN_PRICE_URL = "https://api.kucoin.com/api/v1/market/orderbook/level1?symbol={}"
 KUCOIN_KLINES_URL = "https://api.kucoin.com/api/v1/market/candles"
 FG_URL = "https://api.alternative.me/fng/"
+DEFILLAMA_TVL_URL = "https://api.llama.fi/tvl/ondo-finance"  # Το slug του Ondo Finance στο DefiLlama
+COINGECKO_GLOBAL_URL = "https://api.coingecko.com/api/v3/global"
+CRYPTOPANIC_POSTS_URL = "https://cryptopanic.com/api/v1/posts/"
 STATE_FILE = "state.json"
 
-# ========== ΒΟΗΘΗΤΙΚΕΣ ΣΥΝΑΡΤΗΣΕΙΣ ==========
+# ========== ΒΟΗΘΗΤΙΚΕΣ ΣΥΝΑΡΤΗΣΕΙΣ (οι προηγούμενες παραμένουν ίδιες) ==========
 def load_state():
     try:
         with open(STATE_FILE, "r") as f:
@@ -151,40 +154,94 @@ def update_atr(state):
             print(f"Daily ATR updated: {atr}")
     return state
 
-# ========== ΝΕΕΣ ΣΥΝΑΡΤΗΣΕΙΣ MACRO SCORE ==========
+# ========== ΝΕΕΣ MACRO ΣΥΝΑΡΤΗΣΕΙΣ (ΜΕ ΕΝΙΣΧΥΣΗ) ==========
 
 def get_fear_greed_index():
     try:
         resp = requests.get(FG_URL, timeout=10)
         return int(resp.json()['data'][0]['value'])
-    except Exception as e:
-        print(f"Error getting Fear & Greed: {e}")
+    except:
         return 50
 
 def get_ticker_sma(ticker, period=50):
     try:
         df = yf.download(ticker, period="60d", progress=False)
-        if df.empty:
-            return None
+        if df.empty: return None
         sma = df['Close'].rolling(window=period).mean().iloc[-1]
         return df['Close'].iloc[-1] > sma
-    except Exception as e:
-        print(f"Error getting {ticker}: {e}")
+    except:
         return None
 
 def get_ticker_return(ticker, period="50d"):
     try:
         df = yf.download(ticker, period="60d", progress=False)
-        if df.empty or len(df) < 50:
-            return None
+        if df.empty or len(df) < 50: return None
         past_price = df['Close'].iloc[-50]
         return (df['Close'].iloc[-1] - past_price) / past_price
+    except:
+        return None
+
+def get_ondo_tvl_change():
+    """Επιστρέφει την ποσοστιαία μεταβολή TVL 7 ημερών του Ondo Finance."""
+    try:
+        resp = requests.get(DEFILLAMA_TVL_URL, timeout=10)
+        data = resp.json()
+        current_tvl = data.get("tvl", 0)
+        # Προσπαθούμε να πάρουμε την TVL 7 ημέρες πριν από το chain (δυστυχώς το /tvl/ondo-finance δεν επιστρέφει ιστορικό)
+        # Εναλλακτική: χρησιμοποιούμε το /charts/ondo-finance
+        chart_resp = requests.get("https://api.llama.fi/charts/ondo-finance", timeout=10)
+        chart_data = chart_resp.json()
+        if isinstance(chart_data, list) and len(chart_data) > 0:
+            # Το πιο πρόσφατο είναι το τελευταίο στοιχείο
+            latest = chart_data[-1]
+            current_tvl = latest.get("totalLiquidityUSD", 0)
+            date = datetime.utcfromtimestamp(int(latest["date"]))
+            # Βρίσκουμε την τιμή 7 ημέρες πριν
+            seven_days_ago = date - timedelta(days=7)
+            past_tvl = 0
+            for entry in reversed(chart_data):
+                entry_date = datetime.utcfromtimestamp(int(entry["date"]))
+                if entry_date <= seven_days_ago:
+                    past_tvl = entry.get("totalLiquidityUSD", 0)
+                    break
+            if past_tvl and current_tvl:
+                return (current_tvl - past_tvl) / past_tvl
+        return None
     except Exception as e:
-        print(f"Error getting return for {ticker}: {e}")
+        print(f"Error fetching TVL: {e}")
+        return None
+
+def get_news_sentiment():
+    """Αναλύει το κλίμα ειδήσεων από το CryptoPanic."""
+    if not CRYPTOPANIC_API_KEY:
+        return None
+    try:
+        headers = {"Authorization": f"Bearer {CRYPTOPANIC_API_KEY}"}
+        params = {"currencies": "ONDO,BTC", "kind": "news", "limit": 10}
+        resp = requests.get(CRYPTOPANIC_POSTS_URL, headers=headers, params=params, timeout=10)
+        data = resp.json()
+        posts = data.get("results", [])
+        if not posts:
+            return None
+        total_score = 0
+        for post in posts:
+            total_score += post.get("votes", {}).get("positive", 0) - post.get("votes", {}).get("negative", 0)
+        avg_score = total_score / len(posts)
+        return avg_score
+    except:
+        return None
+
+def get_global_market_change():
+    """Επιστρέφει την ποσοστιαία μεταβολή του συνολικού market cap 24ώρου."""
+    try:
+        resp = requests.get(COINGECKO_GLOBAL_URL, timeout=10)
+        data = resp.json()
+        return data["data"]["market_cap_change_percentage_24h_usd"]
+    except:
         return None
 
 def get_macro_sentiment_score():
-    score = 0
+    score = 0.0
 
     # 1. Παραδοσιακές Αγορές
     qqq_signal = get_ticker_sma("QQQ")
@@ -200,7 +257,6 @@ def get_macro_sentiment_score():
     except:
         pass
 
-    # 2. Μάκρο
     tnx_return = get_ticker_return("^TNX", "50d")
     if tnx_return is not None:
         if tnx_return < -0.02: score += 1.5
@@ -211,12 +267,30 @@ def get_macro_sentiment_score():
         if dxy_return < -0.02: score += 1.5
         elif dxy_return > 0.02: score -= 1.5
 
-    # 3. Κλίμα Crypto
-    fg_value = get_fear_greed_index()
-    if fg_value <= 25: score += 3
-    elif fg_value <= 45: score += 1
-    elif fg_value >= 80: score -= 3
-    elif fg_value >= 65: score -= 1
+    # 2. Fear & Greed
+    fg = get_fear_greed_index()
+    if fg <= 25: score += 3
+    elif fg <= 45: score += 1
+    elif fg >= 80: score -= 3
+    elif fg >= 65: score -= 1
+
+    # 3. On-Chain: TVL ONDO
+    tvl_change = get_ondo_tvl_change()
+    if tvl_change is not None:
+        if tvl_change > 0.05: score += 2
+        elif tvl_change < -0.05: score -= 2
+
+    # 4. Ειδήσεις
+    news_avg = get_news_sentiment()
+    if news_avg is not None:
+        if news_avg > 2: score += 2
+        elif news_avg < -2: score -= 2
+
+    # 5. Γενική Αγορά Crypto
+    global_change = get_global_market_change()
+    if global_change is not None:
+        if global_change > 2: score += 1
+        elif global_change < -2: score -= 1
 
     return max(-10, min(10, score))
 
@@ -253,10 +327,7 @@ activation_buy = buy_support * BUY_BUFFER
 activation_sell = sell_resistance * SELL_BUFFER
 
 atr = state.get("atr_value")
-if atr and price > 0:
-    trailing_distance_pct = (atr * ATR_MULTIPLIER) / price * 100
-else:
-    trailing_distance_pct = 5.0
+trailing_distance_pct = (atr * ATR_MULTIPLIER) / price * 100 if (atr and price > 0) else 5.0
 
 print(f"Μήνας: {current_month}/{current_day}, Season buy: {base_buy_idx}, sell: {base_sell_idx}")
 print(f"Macro Score: {macro_score} → Final buy: {final_buy_idx} (${buy_support}), sell: {final_sell_idx} (${sell_resistance})")
