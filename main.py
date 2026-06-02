@@ -4,9 +4,9 @@ import os
 from datetime import datetime, timedelta
 
 # ========== ΣΤΡΑΤΗΓΙΚΗ ==========
-REBOUND_PCT = 7.0                     # % ανάκαμψης για αγορά
-ATR_MULTIPLIER = 2.0                  # Πόσες φορές το ATR θα είναι το trailing distance
-MIN_SWING_DISTANCE_PCT = 20           # ελάχιστη διαφορά μεταξύ swing points
+REBOUND_PCT = 7.0
+ATR_MULTIPLIER = 2.0
+MIN_SWING_WINDOW = 5          # αριθμός εβδομάδων αριστερά/δεξιά για επιβεβαίωση swing
 
 # ========== SECRETS ==========
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
@@ -56,7 +56,6 @@ def send_telegram(message):
         print(f"Telegram error: {e}")
 
 def send_buy_signal(trailing_distance_pct):
-    """Στέλνει σήμα αγοράς με δυναμικό trailing distance."""
     if not WEBHOOK_URL or not ENTER_LONG_MESSAGE:
         print("Webhook/Message missing")
         return
@@ -66,12 +65,7 @@ def send_buy_signal(trailing_distance_pct):
         "amountPerTradeType": "quote",
         "amountPerTrade": 50,
         "leverage": 1,
-        "takeProfits": [
-            {
-                "price": 0,
-                "portfolio": 100
-            }
-        ],
+        "takeProfits": [{"price": 0, "portfolio": 100}],
         "trailingStop": {
             "activation": 2.0,
             "execute": trailing_distance_pct
@@ -112,7 +106,6 @@ def determine_lookbacks(state):
         if days is None:
             days = 365
         state["asset_age_days"] = days
-
     if days < 365:
         return 180, 365
     elif days < 1095:
@@ -138,25 +131,22 @@ def get_weekly_data(symbol, lookback_days):
         print(f"Error fetching klines: {e}")
         return [], [], []
 
-def find_swings(highs, lows):
-    swing_lows, swing_highs = [], []
-    for i in range(1, len(highs)-1):
-        if highs[i] > highs[i-1] and highs[i] > highs[i+1]:
+def find_swings(highs, lows, window=5):
+    """Βρίσκει swing highs/lows με παράθυρο επιβεβαίωσης window εβδομάδων."""
+    swing_highs = []
+    swing_lows = []
+    n = len(highs)
+    for i in range(window, n - window):
+        # Swing high: το υψηλότερο υψηλό σε παράθυρο 2*window+1
+        if highs[i] == max(highs[i-window:i+window+1]):
             swing_highs.append(highs[i])
-        if lows[i] < lows[i-1] and lows[i] < lows[i+1]:
+        # Swing low: το χαμηλότερο χαμηλό σε παράθυρο 2*window+1
+        if lows[i] == min(lows[i-window:i+window+1]):
             swing_lows.append(lows[i])
-
-    def filter_swings(points, keep_high=True):
-        if not points:
-            return []
-        points.sort(reverse=keep_high)
-        filtered = [points[0]]
-        for p in points[1:]:
-            if abs(p - filtered[-1]) / filtered[-1] >= MIN_SWING_DISTANCE_PCT / 100:
-                filtered.append(p)
-        return filtered
-
-    return filter_swings(swing_lows, keep_high=False)[:3], filter_swings(swing_highs, keep_high=True)[:3]
+    # Ταξινόμηση και επιλογή 3 πιο ακραίων (υψηλότερα highs, χαμηλότερα lows)
+    swing_highs.sort(reverse=True)
+    swing_lows.sort()
+    return swing_lows[:3], swing_highs[:3]
 
 def calculate_atr(highs, lows, closes, period=14):
     if len(highs) < period:
@@ -181,7 +171,7 @@ def update_levels(state):
 
     s_highs, s_lows, s_closes = get_weekly_data("ONDO-USDT", supp_lb)
     if s_highs:
-        supports, _ = find_swings(s_highs, s_lows)
+        supports, _ = find_swings(s_highs, s_lows, MIN_SWING_WINDOW)
         state["supports"] = supports
         atr = calculate_atr(s_highs, s_lows, s_closes, 14)
         if atr:
@@ -190,7 +180,7 @@ def update_levels(state):
 
     r_highs, r_lows, _ = get_weekly_data("ONDO-USDT", res_lb)
     if r_highs:
-        _, resistances = find_swings(r_highs, r_lows)
+        _, resistances = find_swings(r_highs, r_lows, MIN_SWING_WINDOW)
         state["resistances"] = resistances
 
     if state.get("supports") and state.get("resistances"):
