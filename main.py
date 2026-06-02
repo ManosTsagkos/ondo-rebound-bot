@@ -10,7 +10,7 @@ MIN_SWING_DISTANCE_PCT = 20           # ελάχιστη διαφορά μετα
 
 # ========== SECRETS ==========
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
-# Δεν χρειαζόμαστε πλέον το ENTER_LONG_MESSAGE, γιατί στέλνουμε JSON
+ENTER_LONG_MESSAGE = os.environ.get("ENTER_LONG_MESSAGE")  # Το επαναφέρουμε
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
@@ -57,12 +57,12 @@ def send_telegram(message):
 
 def send_buy_signal(trailing_distance_pct):
     """Στέλνει σήμα αγοράς με δυναμικό trailing distance."""
-    if not WEBHOOK_URL:
-        print("Webhook missing")
+    if not WEBHOOK_URL or not ENTER_LONG_MESSAGE:
+        print("Webhook/Message missing")
         return
     # Δημιουργούμε JSON payload που θα διαβάσει το WunderTrading
     payload = {
-        "code": "ENTER-LONG_KuCoin_ONDO-USDT_BDSATH ONDO_5M_9f474ad57d91e7d0db7b836d",  # Βάλε το δικό σου Enter‑Long σχόλιο
+        "code": ENTER_LONG_MESSAGE,    # Δυναμικά από τα Secrets
         "orderType": "market",
         "amountPerTradeType": "quote",
         "amountPerTrade": 50,          # ή όσο έχεις ορίσει
