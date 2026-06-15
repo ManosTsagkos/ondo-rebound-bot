@@ -2,9 +2,9 @@
 """
 ONDO Rebound Bot - Macro Adaptive Crypto Trading Bot
 
-Αυτό το bot υλοποιεί μια στρατηγική Macro Swing Trading για το ONDO/USD.
-Εκτελείται κάθε 10 λεπτά σε GitHub Actions και στέλνει σήματα στο WunderTrading
-για την εκτέλεση εντολών στο Kraken.
+This bot implements a Macro Swing Trading strategy for ONDO/USD.
+It runs every 10 minutes on GitHub Actions and sends signals to WunderTrading
+for order execution on Kraken.
 """
 
 import json
@@ -15,21 +15,22 @@ import yfinance as yf
 import feedparser
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
-# Σταθερές
+# Constants
 ATR_MULTIPLIER = 2.0
-BUY_BUFFER = 1.01    # +1% πάνω από το support
-SELL_BUFFER = 0.99   # -1% κάτω από το resistance
-LOOKBACK_DAYS = 1460 # 4 έτη για τον υπολογισμό επιπέδων
-SWING_WINDOW = 20    # ημέρες για τον εντοπισμό swing points
+BUY_BUFFER = 1.01    # +1% above support
+SELL_BUFFER = 0.99   # -1% below resistance
+LOOKBACK_DAYS = 1460 # 4 years for level calculation
+SWING_WINDOW = 20    # days for swing point detection
 
 # Environment variables (secrets)
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 ENTER_LONG_MESSAGE = os.environ.get("ENTER_LONG_MESSAGE")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+TRADE_AMOUNT = float(os.environ.get("TRADE_AMOUNT", "1"))  # Default \$1 for testing
 
 def load_state():
-    """Φορτώνει την κατάσταση από το state.json ή επιστρέφει default τιμές."""
+    """Load state from state.json or return default values."""
     try:
         with open("state.json", "r") as f:
             return json.load(f)
@@ -47,7 +48,7 @@ def load_state():
         }
 
 def save_state(state):
-    """Αποθηκεύει την κατάσταση στο state.json."""
+    """Save state to state.json."""
     try:
         with open("state.json", "w") as f:
             json.dump(state, f, indent=2)
@@ -55,7 +56,7 @@ def save_state(state):
         print(f"Error saving state: {e}")
 
 def get_price():
-    """Παίρνει την τρέχουσα τιμή του ONDO από το Kraken API."""
+    """Get current ONDO price from Kraken API."""
     try:
         response = requests.get("https://api.kraken.com/0/public/Ticker?pair=ONDOUSD")
         data = response.json()
@@ -68,7 +69,7 @@ def get_price():
         return None
 
 def get_daily_klines(days=LOOKBACK_DAYS):
-    """Παίρνει ημερήσια κεριά από το Kraken API."""
+    """Get daily candles from Kraken API."""
     try:
         since = int((datetime.now() - timedelta(days=days)).timestamp())
         response = requests.get(f"https://api.kraken.com/0/public/OHLC?pair=ONDOUSD&interval=1440&since={since}")
@@ -77,7 +78,7 @@ def get_daily_klines(days=LOOKBACK_DAYS):
             print(f"Kraken OHLC API error: {data['error']}")
             return []
         
-        # Μετατροπή σε λίστα από dictionaries για ευκολότερη διαχείριση
+        # Convert to list of dictionaries for easier handling
         klines = []
         for candle in data["result"]["ONDOUSD"]:
             klines.append({
@@ -96,17 +97,17 @@ def get_daily_klines(days=LOOKBACK_DAYS):
         return []
 
 def find_swings(highs, lows):
-    """Εντοπίζει swing highs και swing lows και επιστρέφει supports/resistances."""
+    """Find swing highs and swing lows and return supports/resistances."""
     try:
         swing_highs = []
         swing_lows = []
         
-        # Εντοπισμός swing highs
+        # Find swing highs
         for i in range(SWING_WINDOW, len(highs) - SWING_WINDOW):
             current_high = highs[i]
             is_swing_high = True
             
-            # Έλεγχος αν είναι το υψηλότερο στο παράθυρο
+            # Check if it's the highest in the window
             for j in range(i - SWING_WINDOW, i + SWING_WINDOW + 1):
                 if highs[j] > current_high:
                     is_swing_high = False
@@ -115,12 +116,12 @@ def find_swings(highs, lows):
             if is_swing_high:
                 swing_highs.append((i, current_high))
         
-        # Εντοπισμός swing lows
+        # Find swing lows
         for i in range(SWING_WINDOW, len(lows) - SWING_WINDOW):
             current_low = lows[i]
             is_swing_low = True
             
-            # Έλεγχος αν είναι το χαμηλότερο στο παράθυρο
+            # Check if it's the lowest in the window
             for j in range(i - SWING_WINDOW, i + SWING_WINDOW + 1):
                 if lows[j] < current_low:
                     is_swing_low = False
@@ -129,18 +130,18 @@ def find_swings(highs, lows):
             if is_swing_low:
                 swing_lows.append((i, current_low))
         
-        # Ταξινόμηση και επιλογή των 3 σημαντικότερων
+        # Sort and select the 3 most significant
         swing_highs.sort(key=lambda x: x[1], reverse=True)
         swing_lows.sort(key=lambda x: x[1])
         
-        # Προσθήκη των ακραίων τιμών
+        # Add extreme values
         all_highs = [h[1] for h in swing_highs]
         all_lows = [l[1] for l in swing_lows]
         
         resistances = []
         supports = []
         
-        # 3 υψηλότερα swing highs + το απόλυτο υψηλό
+        # 3 highest swing highs + absolute high
         if len(swing_highs) >= 3:
             resistances = [h[1] for h in swing_highs[:3]]
         else:
@@ -149,7 +150,7 @@ def find_swings(highs, lows):
         if all_highs:
             resistances.append(max(all_highs))
         
-        # 3 χαμηλότερα swing lows + το απόλυτο χαμηλό
+        # 3 lowest swing lows + absolute low
         if len(swing_lows) >= 3:
             supports = [l[1] for l in swing_lows[:3]]
         else:
@@ -164,7 +165,7 @@ def find_swings(highs, lows):
         return [], []
 
 def calculate_daily_atr(klines):
-    """Υπολογίζει το ATR (Average True Range) για 14 ημέρες."""
+    """Calculate ATR (Average True Range) for 14 days."""
     try:
         if len(klines) < 15:
             return None
@@ -179,7 +180,7 @@ def calculate_daily_atr(klines):
             tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
             tr_values.append(tr)
         
-        # Μέσος όρος των τελευταίων 14 τιμών TR
+        # Average of the last 14 TR values
         atr = sum(tr_values[-14:]) / 14
         return atr
     except Exception as e:
@@ -187,7 +188,7 @@ def calculate_daily_atr(klines):
         return None
 
 def update_swing_levels(state):
-    """Ενημερώνει τα επίπεδα support/resistance μία φορά την εβδομάδα."""
+    """Update support/resistance levels once a week."""
     try:
         current_week = datetime.now().strftime("%Y-%U")
         last_update = state.get("last_swing_update")
@@ -197,23 +198,68 @@ def update_swing_levels(state):
         
         print("Updating swing levels...")
         
-        # Λήψη δεδομένων
+        # Get data
         klines = get_daily_klines()
         if not klines:
             return state
         
-        # Εξαγωγή highs και lows
+        # Extract highs and lows
         highs = [k["high"] for k in klines]
         lows = [k["low"] for k in klines]
         
-        # Εντοπισμός swing points
+        # Find swing points
         supports, resistances = find_swings(highs, lows)
         
-        # Ενημέρωση state
+        # Update state
         state["supports"] = supports
         state["resistances"] = resistances
         state["last_swing_update"] = current_week
         
-        # Υπολογισμός ηλικίας του asset (ημέρες από το πρώτο κερί)
+        # Calculate asset age (days from first candle)
         if klines:
-            first
+            first_candle_time = datetime.fromtimestamp(klines[0]["time"])
+            asset_age = (datetime.now() - first_candle_time).days
+            state["asset_age_days"] = asset_age
+        
+        print(f"Updated supports: {supports}")
+        print(f"Updated resistances: {resistances}")
+        
+        return state
+    except Exception as e:
+        print(f"Error updating swing levels: {e}")
+        return state
+
+def update_atr(state):
+    """Update ATR value once a day."""
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        last_update = state.get("last_atr_update")
+        
+        if last_update == today:
+            return state
+        
+        print("Updating ATR...")
+        
+        # Get data
+        klines = get_daily_klines()
+        if not klines:
+            return state
+        
+        # Calculate ATR
+        atr = calculate_daily_atr(klines)
+        if atr:
+            state["atr_value"] = atr
+            state["last_atr_update"] = today
+            print(f"Updated ATR: {atr}")
+        
+        return state
+    except Exception as e:
+        print(f"Error updating ATR: {e}")
+        return state
+
+def send_buy_signal(trailing_pct):
+    """Send buy signal to WunderTrading."""
+    try:
+        if not WEBHOOK_URL or not ENTER_LONG_MESSAGE:
+            print("Missing webhook URL or enter long message")
+            return
