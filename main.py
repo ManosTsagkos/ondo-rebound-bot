@@ -141,4 +141,79 @@ def find_swings(highs, lows):
         supports = []
         
         # 3 υψηλότερα swing highs + το απόλυτο υψηλό
-        if len(swing_highs
+        if len(swing_highs) >= 3:
+            resistances = [h[1] for h in swing_highs[:3]]
+        else:
+            resistances = [h[1] for h in swing_highs]
+        
+        if all_highs:
+            resistances.append(max(all_highs))
+        
+        # 3 χαμηλότερα swing lows + το απόλυτο χαμηλό
+        if len(swing_lows) >= 3:
+            supports = [l[1] for l in swing_lows[:3]]
+        else:
+            supports = [l[1] for l in swing_lows]
+        
+        if all_lows:
+            supports.append(min(all_lows))
+        
+        return supports, resistances
+    except Exception as e:
+        print(f"Error finding swings: {e}")
+        return [], []
+
+def calculate_daily_atr(klines):
+    """Υπολογίζει το ATR (Average True Range) για 14 ημέρες."""
+    try:
+        if len(klines) < 15:
+            return None
+        
+        tr_values = []
+        
+        for i in range(1, len(klines)):
+            high = klines[i]["high"]
+            low = klines[i]["low"]
+            prev_close = klines[i-1]["close"]
+            
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            tr_values.append(tr)
+        
+        # Μέσος όρος των τελευταίων 14 τιμών TR
+        atr = sum(tr_values[-14:]) / 14
+        return atr
+    except Exception as e:
+        print(f"Error calculating ATR: {e}")
+        return None
+
+def update_swing_levels(state):
+    """Ενημερώνει τα επίπεδα support/resistance μία φορά την εβδομάδα."""
+    try:
+        current_week = datetime.now().strftime("%Y-%U")
+        last_update = state.get("last_swing_update")
+        
+        if last_update == current_week:
+            return state
+        
+        print("Updating swing levels...")
+        
+        # Λήψη δεδομένων
+        klines = get_daily_klines()
+        if not klines:
+            return state
+        
+        # Εξαγωγή highs και lows
+        highs = [k["high"] for k in klines]
+        lows = [k["low"] for k in klines]
+        
+        # Εντοπισμός swing points
+        supports, resistances = find_swings(highs, lows)
+        
+        # Ενημέρωση state
+        state["supports"] = supports
+        state["resistances"] = resistances
+        state["last_swing_update"] = current_week
+        
+        # Υπολογισμός ηλικίας του asset (ημέρες από το πρώτο κερί)
+        if klines:
+            first
